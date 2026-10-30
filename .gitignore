@@ -1,7 +1,7 @@
-# Environnement virtuel
+# Virtual environment
 .venv/
 
-# Fichiers générés par Python
+# Python generated files
 __pycache__/
 *.pyc
 .pytest_cache/

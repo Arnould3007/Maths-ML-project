@@ -146,8 +146,11 @@ class BaseSLPEstimator(ABC):
         Initialize weights and biases.
 
         Requires self.n_features_in_ (d) and self.n_outputs_ (k), set in fit().
-        Weights ~ N(0, 0.01^2): random to break the symmetry between hidden
-        neurons, small to keep z1 away from the saturated zone of the activation.
+        Weights ~ N(0, 2 / (fan_in + fan_out)) (Glorot/Xavier, as in scikit-learn):
+        random to break the symmetry between hidden neurons, and scaled so that
+        the signal keeps the same variance from one layer to the next.
+        A fixed std of 0.01 (the scaffold's example) made W2 so small that the
+        hidden layer received almost no gradient and the classifier did not learn.
         Biases start at 0 (the random weights already break the symmetry).
         """
         # Local generator: same seed -> same weights, without touching NumPy's global state.
@@ -155,9 +158,9 @@ class BaseSLPEstimator(ABC):
         self._rng = np.random.default_rng(self.random_state)
 
         d, h, k = self.n_features_in_, self.hidden_layer_size, self.n_outputs_
-        self.W1_ = self._rng.normal(loc=0.0, scale=0.01, size=(d, h))  # (d, h)
+        self.W1_ = self._rng.normal(loc=0.0, scale=np.sqrt(2.0 / (d + h)), size=(d, h))  # (d, h)
         self.b1_ = np.zeros(h)  # (h,)
-        self.W2_ = self._rng.normal(loc=0.0, scale=0.01, size=(h, k))  # (h, k)
+        self.W2_ = self._rng.normal(loc=0.0, scale=np.sqrt(2.0 / (h + k)), size=(h, k))  # (h, k)
         self.b2_ = np.zeros(k)  # (k,)
 
     def _train(self, X: NDArray[np.floating], Y: NDArray[np.floating]) -> None:

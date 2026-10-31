@@ -150,13 +150,189 @@ Result: **21/21 tests pass**.
 
 ## 2. `slp_base.py`
 
-*To be completed.*
+### What this file does
+`BaseSLPEstimator` is the **parent class** of the classifier and the regressor. It holds everything the two models share:
+- the hyperparameters (`hidden_layer_size`, `activation`, `learning_rate`, `max_iter`, `random_state`, plus `batch_size` and the early-stopping options),
+- the choice of the activation function (`_get_activation_function`),
+- parameter and input validation (`_validate_params`, `_validate_input`),
+- weight initialization (`_initialize_weights`),
+- the **training loop** (`_train`): mini-batch gradient descent + early stopping.
+
+What differs between the two models (output activation, loss, gradient of the output layer, `predict`, `score`) is declared as `@abstractmethod` and written in each subclass. This is the **template method** pattern: the parent defines the algorithm, the children fill in the specific steps.
+
+### Shapes used everywhere
+
+| Symbol | Meaning | Array | Shape |
+|---|---|---|---|
+| n | number of samples | `X` | `(n, d)` |
+| d | number of features (`n_features_in_`) | `W1` | `(d, h)` |
+| h | hidden neurons (`hidden_layer_size`) | `b1` | `(h,)` |
+| k | output neurons (`n_outputs_`) | `W2` | `(h, k)` |
+| | | `b2` | `(k,)` |
+
+`n_features_in_` and `n_outputs_` are the scikit-learn names. They are set in `fit()` (they depend on the data) **before** `_initialize_weights()` is called, because that method has no arguments in the scaffold.
+
+---
+
+### `_initialize_weights`
+
+```python
+self._rng = np.random.default_rng(self.random_state)
+d, h, k = self.n_features_in_, self.hidden_layer_size, self.n_outputs_
+self.W1_ = self._rng.normal(loc=0.0, scale=0.01, size=(d, h))
+self.b1_ = np.zeros(h)
+self.W2_ = self._rng.normal(loc=0.0, scale=0.01, size=(h, k))
+self.b2_ = np.zeros(k)
+```
+
+- **Weights ~ N(0, 0.01²)** (as the scaffold asks).
+  - **Random**, to break the symmetry: if all weights were equal (e.g. 0), every hidden neuron would compute the same value, receive the same gradient and stay identical forever. The hidden layer would behave like a single neuron.
+  - **Small**, so that `z1` starts near 0, where sigmoid/tanh are not saturated (derivative close to its maximum).
+- **Biases = 0**: the random weights are already enough to break the symmetry.
+- **`np.random.default_rng(random_state)`** instead of `np.random.seed(...)`: it creates a *local* generator. Same seed gives the same weights (reproducibility, checked by `test_reproducibility`), and it does not change NumPy's *global* random state, which the user's own code may rely on. The generator is kept in `self._rng` and reused to shuffle the mini-batches, so the whole training run is reproducible from one seed.
+
+---
+
+### `_validate_params` and `_validate_input`
+- `_validate_params` (called at the start of `fit`) raises a clear `ValueError` for impossible settings: `hidden_layer_size < 1`, `learning_rate <= 0`, unknown activation, `batch_size < 1`, `validation_fraction` outside (0, 1), etc. Failing early with a clear message is better than a cryptic NumPy error 200 lines later.
+- `_validate_input` converts `X` to a 2D float array (so lists work too), checks that `X` and `y` have the same number of rows and, at prediction time, that `X` has the same number of features as during `fit`.
+
+---
+
+### `_train`: mini-batch gradient descent + early stopping
+
+**One epoch** (= one iteration of `max_iter`, like `MLPRegressor`):
+1. shuffle the sample indices (`self._rng.permutation(n)`),
+2. cut them into mini-batches of `batch_size` samples,
+3. for each batch: forward, backward, then the update `θ ← θ − η · ∂L/∂θ` for θ ∈ {W1, b1, W2, b2},
+4. compute the loss on the whole training set and append it to `loss_curve_`.
+
+The only `for` loops are over **epochs** and **batches**, never over samples or weights: inside a batch everything is matrix algebra (vectorized).
+
+**Why mini-batches (`batch_size=32` by default) and not full batch?** Measured on the test datasets (R² on the test set, `learning_rate=0.01`, 300 epochs):
+
+| | linear / logistic | linear / relu | make_regression / logistic | make_regression / relu |
+|---|---|---|---|---|
+| full batch | **0.003** | 0.965 | 0.795 | 0.983 |
+| batch 32 | **0.973** | 0.994 | 0.930 | 0.990 |
+| batch 16 | 0.981 | 0.999 | 0.945 | NaN (diverges) |
+
+With small initial weights and a sigmoid, `a1 ≈ 0.5` for every sample and `dW1 ∝ W2 ≈ 0.01`: the network starts on a **plateau**. Full batch makes only 300 updates in 300 epochs, which is not enough to leave it. With batches of 32 on 140 samples there are 5 updates per epoch (1 500 in total), and the noise of each batch gradient also helps escape the plateau. Batch 16 makes steps too large for targets of order 100 and diverges. `batch_size=None` still gives full-batch gradient descent.
+
+**Early stopping (`early_stopping=True`)**, same logic as scikit-learn:
+- a random `validation_fraction` (10 %) of the training data is held out and **never** used for gradient steps,
+- after each epoch, the loss on this validation set is computed (`validation_loss_curve_`),
+- if it has not decreased by at least `tol` for `n_iter_no_change` epochs in a row, training stops,
+- the weights of the **best** validation epoch are restored (`.copy()` is needed, otherwise we would save a reference to arrays that keep changing).
+
+It stops training when the model starts to **overfit** (training loss still goes down, validation loss goes up), and saves time. Example on `load_diabetes` (standardized y, relu, `learning_rate=0.1`): R² = 0.248 without early stopping vs **0.493** with it (stopped at epoch 24/500).
+Limit: on a slow plateau (sigmoid, small learning rate), the validation loss can improve by less than `tol` for 10 epochs and training stops too early. This is why it is off by default.
+
+**Divergence guard**: if the loss becomes `inf`/`NaN` (learning rate too large, or unscaled target), training stops with a `RuntimeWarning` that says what to change. This follows the "monitor numerical stability" tip of the project.
 
 ---
 
 ## 3. `slp_regressor.py`
 
-*To be completed.*
+### What this file does
+`SimpleSLPRegressor` predicts a **continuous value**. It inherits everything shared from `BaseSLPEstimator` and implements the regression-specific parts: identity output, MSE loss, its gradient, `fit`, `predict` and the R² `score`.
+
+### Forward propagation
+
+```python
+z1 = X @ self.W1_ + self.b1_   # (n, d) @ (d, h) + (h,) -> (n, h)
+a1 = activation(z1)            # (n, h)
+z2 = a1 @ self.W2_ + self.b2_  # (n, h) @ (h, k) + (k,) -> (n, k)
+y_pred = z2                    # identity output
+```
+
+- `b1` has shape `(h,)` and is added to every row of `X @ W1` by **broadcasting**: every sample gets the same bias.
+- **Identity output**: a regression target can be any real number. A sigmoid would force the output into (0, 1) and could never predict, say, 150.
+- The function returns `z1, a1, z2, y_pred` (not only `y_pred`) because backpropagation needs these intermediate values: they are computed once and reused.
+
+### Loss: mean squared error
+
+$$L = \frac{1}{2n}\sum_{i=1}^{n}\sum_{j=1}^{k}(\hat y_{ij} - y_{ij})^2$$
+
+```python
+return float(np.sum((y_pred - y_true) ** 2) / (2 * n_samples))
+```
+
+- The **½** cancels the 2 coming from the derivative of the square, so the gradient is exactly `(y_pred − y)/n`. Without it, the gradient would be `2(y_pred − y)/n`: same minimum, but it acts like a learning rate twice as large.
+- **Loss and gradient must use the same factor.** If they did not, `loss_curve_` would describe a different function from the one gradient descent is actually minimizing.
+- MSE = maximum likelihood under Gaussian noise (Session 4, slide 2, MLE recipe): if `y = f(x) + ε` with `ε ~ N(0, σ²)`, maximizing the log-likelihood is the same as minimizing Σ(y − f(x))².
+
+### Backpropagation (chain rule)
+
+```python
+dz2 = (y_pred - y) / n_samples          # (n, k)
+dW2 = a1.T @ dz2                        # (h, n) @ (n, k) -> (h, k)
+db2 = dz2.sum(axis=0)                   # (k,)
+da1 = dz2 @ self.W2_.T                  # (n, k) @ (k, h) -> (n, h)
+dz1 = da1 * activation_derivative(z1)   # (n, h)
+dW1 = X.T @ dz1                         # (d, n) @ (n, h) -> (d, h)
+db1 = dz1.sum(axis=0)                   # (h,)
+```
+
+Line by line:
+1. **`dz2 = ∂L/∂z2`**. With an identity output, `y_pred = z2`, so `∂L/∂z2 = ∂L/∂y_pred = (y_pred − y)/n`. This is the **output-layer error**, the same form `(y_n − t_n)` as Session 3, slide 29.
+2. **`dW2`**: `z2 = a1 @ W2 + b2`, so the weight `W2[p, j]` is multiplied by `a1[i, p]` for every sample i. Its gradient is `Σᵢ a1[i, p] · dz2[i, j]`, which is exactly the matrix product `a1.T @ dz2`. **The matrix product does the sum over samples.**
+3. **`db2`**: the bias is added to every sample, so its gradient is the sum of `dz2` over the samples (`axis=0`).
+4. **`da1`**: send the error back through the weights: each hidden neuron receives the output errors weighted by its outgoing weights (`W2.T`).
+5. **`dz1`**: chain rule through the activation `a1 = g(z1)`, applied element by element, so it is `*` and **not** `@`. This is where `relu_derivative`, `tanh_derivative` and `logistic_derivative` from `activations.py` are used.
+6. **`dW1`, `db1`**: same as steps 2-3, one layer lower (with `X` in place of `a1`).
+
+**Shape check (useful at the oral):** every gradient has **the same shape as the parameter it updates**. That is how you know where `.T` goes.
+
+**Verification:** the analytical gradients were compared with finite differences `(L(θ+ε) − L(θ−ε)) / 2ε` for every parameter and all 3 activations: max error ~1e-10, so the backpropagation is correct.
+
+### `fit`
+
+```python
+self._validate_params()
+X, y = self._validate_input(X, y)
+y = y.astype(float)
+self._y_is_1d = y.ndim == 1
+Y = y.reshape(-1, 1) if self._y_is_1d else y
+self.n_features_in_ = X.shape[1]
+self.n_outputs_ = Y.shape[1]
+self._train(X, Y)
+return self
+```
+
+- Inside the network, `y` is always 2D `(n, k)`, so that `y_pred - y` is `(n, 1) - (n, 1)`. If `y` stayed `(n,)`, then `(n, 1) - (n,)` would **broadcast** to an `(n, n)` matrix: no error, but a completely wrong gradient. This is a classic NumPy trap.
+- `_y_is_1d` remembers the original format so that `predict` returns the same shape as the `y` given to `fit` (the tests expect `(n,)`).
+- `return self` is the scikit-learn convention (it allows `model.fit(X, y).predict(X)`).
+- The training loop itself is the shared `_train` from the base class.
+
+### `predict`
+Forward pass only (no gradient), then `ravel()` back to `(n,)` if `y` was 1D. It raises a clear error if the model has not been fitted, or if `X` has the wrong number of features.
+
+### `score`: R² (coefficient of determination)
+
+$$R^2 = 1 - \frac{SS_{res}}{SS_{tot}} = 1 - \frac{\sum_i (y_i - \hat y_i)^2}{\sum_i (y_i - \bar y)^2}$$
+
+- `SS_tot` is the error of the dumbest model, which always predicts the mean ȳ.
+- R² = 1 means perfect predictions. R² = 0 means no better than the mean. **R² < 0** means worse than the mean (possible on a test set).
+- For several outputs, R² is computed per output and then averaged, exactly like `sklearn.metrics.r2_score` (checked: identical values).
+
+### Target scaling (important for the report)
+The model does **not** standardize `y` internally:
+- with the tests' settings (`learning_rate=0.01`, raw `y`), internal scaling makes gradients smaller and learning too slow (the linear test drops to R² ≈ 0.3);
+- but on `load_diabetes` (y between 25 and 346), raw `y` makes `dz2` huge and relu **diverges** (NaN). Even sklearn's `MLPRegressor` only reaches R² = −0.5 on the raw target.
+
+So, as the project tips say, **standardize the target yourself** for real datasets and transform the predictions back:
+
+```python
+mu, sd = y_train.mean(), y_train.std()
+reg.fit(X_train, (y_train - mu) / sd)
+y_pred = reg.predict(X_test) * sd + mu
+```
+
+On `load_diabetes` (30 hidden neurons, 500 epochs, standardized X and y): **R² ≈ 0.50 for our model vs 0.43 for `MLPRegressor`**.
+
+### Tests
+`pytest -q test_models.py -k "Regressor or regressor"`: **8/8 pass** (initialization, output shape and finiteness, R² > 0.5, loss decreases, constant target, linear function R² > 0.8, minimal data, comparison with sklearn R² > 0.6). The regressor smoke test passes too.
 
 ---
 
@@ -185,3 +361,23 @@ Result: **21/21 tests pass**.
 - **Why subtract the max in softmax?** Numerical stability: it prevents overflow and does not change the result, since the constant cancels out between numerator and denominator.
 - **Why `keepdims=True`?** To keep shape `(n_samples, 1)` so broadcasting works row by row.
 - **Why is there no softmax derivative?** Combined with cross-entropy, the output gradient simplifies to `y_pred - y_true`.
+
+### Base class and training
+- **Why not initialize all weights to 0?** Every hidden neuron would compute the same thing and get the same gradient, so they would stay identical forever (symmetry). Random weights break the symmetry.
+- **Why small weights (std 0.01)?** To start in the non-saturated zone of sigmoid/tanh, where the derivative is large. Downside: the network starts on a plateau, which is why mini-batches help.
+- **Why `default_rng` and not `np.random.seed`?** It is a local generator: reproducible, and it does not change NumPy's global random state.
+- **What is an epoch? A batch?** An epoch is one pass over all training samples. A batch is the subset used for one gradient step. With n = 140 and batch_size = 32, one epoch = 5 updates.
+- **Full batch vs mini-batch vs SGD?** Full batch: exact gradient, 1 update per epoch. SGD (batch = 1): very noisy, n updates per epoch. Mini-batch: a compromise, still vectorized inside a batch. Measured here: full batch was stuck (R² = 0.003 on the linear test) and batch 32 reached 0.973.
+- **Why shuffle every epoch?** So the batches are different every time and the gradient noise is not biased by the order of the data.
+- **How does early stopping work, and why restore the best weights?** Hold out a validation set, stop when its loss has not improved by `tol` for `n_iter_no_change` epochs. The last weights are already slightly overfitted, so the best ones are restored.
+- **Is there a loop over samples?** No. Only over epochs and batches. Inside a batch, `a1.T @ dz2` does the sum over samples.
+
+### Regressor
+- **Why an identity output?** The target is any real number. A sigmoid would bound the output to (0, 1).
+- **Why the ½ in the MSE?** It cancels the 2 of the derivative, so the gradient is `(y_pred − y)/n`. Loss and gradient must use the same factor, otherwise `loss_curve_` does not track what we really minimize.
+- **Why is `dW2 = a1.T @ dz2`?** Chain rule: `∂L/∂W2[p, j] = Σᵢ a1[i, p] · dz2[i, j]`, and that sum over samples is the matrix product. Shape check: (h, n) @ (n, k) = (h, k) = shape of W2.
+- **Why `*` for `dz1` but `@` for `dW1`?** The activation acts element by element (each neuron separately), so the chain rule is element-wise there. Weights mix neurons together, which is a matrix product.
+- **How did you check that the gradients are correct?** Finite differences `(L(θ+ε) − L(θ−ε))/2ε` for every parameter: difference ~1e-10.
+- **Why reshape y to (n, 1)?** `(n, 1) - (n,)` broadcasts to `(n, n)` silently, which gives a wrong gradient with no error.
+- **What does R² < 0 mean?** The model is worse than always predicting the mean of y.
+- **Why standardize y on diabetes?** y ≈ 150 makes the output error, and therefore the gradient steps, huge: training diverges. With standardized y, R² ≈ 0.50 (sklearn: 0.43).

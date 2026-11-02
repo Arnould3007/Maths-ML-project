@@ -6,6 +6,42 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+def identity(z: NDArray[np.floating]) -> NDArray[np.floating]:
+    """
+    Identity activation (no-op), as in scikit-learn's activation='identity'.
+
+    Parameters:
+    -----------
+    z : array-like
+        Input values (pre-activation)
+
+    Returns:
+    --------
+    array-like
+        The input, unchanged
+    """
+    # With an identity hidden layer the whole network is linear in X (a linear model)
+    return z
+
+
+def identity_derivative(z: NDArray[np.floating]) -> NDArray[np.floating]:
+    """
+    Derivative of the identity activation.
+
+    Parameters:
+    -----------
+    z : array-like
+        Input values (pre-activation)
+
+    Returns:
+    --------
+    array-like
+        Gradient values (all ones)
+    """
+    # d/dz z = 1 everywhere; new array so callers can modify it safely
+    return np.ones_like(z, dtype=float)
+
+
 def relu(z: NDArray[np.floating]) -> NDArray[np.floating]:
     """
     ReLU activation function.

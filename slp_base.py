@@ -8,6 +8,8 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 from numpy.typing import NDArray
 from activations import (
+    identity,
+    identity_derivative,
     relu,
     relu_derivative,
     tanh,
@@ -90,7 +92,9 @@ class BaseSLPEstimator(ABC):
         self,
     ) -> Tuple[Callable[[NDArray], NDArray], Callable[[NDArray], NDArray]]:
         """Return the activation function and its derivative."""
-        if self.activation == "relu":
+        if self.activation == "identity":
+            return identity, identity_derivative
+        elif self.activation == "relu":
             return relu, relu_derivative
         elif self.activation == "tanh":
             return tanh, tanh_derivative
@@ -174,6 +178,7 @@ class BaseSLPEstimator(ABC):
         self._initialize_weights()  # also creates self._rng
         self.loss_curve_ = []
         self.validation_loss_curve_ = []
+        self.n_iter_ = 0
 
         if self.early_stopping:
             # Hold out a random validation set that is never used for gradient steps
@@ -191,6 +196,10 @@ class BaseSLPEstimator(ABC):
         batch_size = n_samples if self.batch_size is None else min(self.batch_size, n_samples)
 
         for epoch in range(self.max_iter):
+            # Weights at the end of the previous epoch (finite, or we would have stopped):
+            # restored if this epoch diverges, so the model is never left with NaN weights
+            last_finite_params = (self.W1_.copy(), self.b1_.copy(), self.W2_.copy(), self.b2_.copy())
+
             # New random order every epoch, so the mini-batches differ between epochs
             order = self._rng.permutation(n_samples)
             for start in range(0, n_samples, batch_size):  # loop over batches, not samples
@@ -205,14 +214,18 @@ class BaseSLPEstimator(ABC):
                 self.b2_ -= self.learning_rate * db2
 
             # Loss on the whole training set at the end of the epoch
-            self.loss_curve_.append(self._compute_loss(Y, self._forward_propagation(X)[3]))
-            self.n_iter_ = epoch + 1
-            if not np.isfinite(self.loss_curve_[-1]):
+            loss = self._compute_loss(Y, self._forward_propagation(X)[3])
+            if not np.isfinite(loss):
+                # Divergence: go back to the last finite weights, keep only the finite losses
+                self.W1_, self.b1_, self.W2_, self.b2_ = last_finite_params
                 warnings.warn(
-                    "Training diverged (loss is inf/NaN): lower learning_rate or standardize the target.",
+                    f"Training diverged at epoch {epoch + 1} (loss is inf/NaN): weights restored "
+                    "from the last finite epoch. Lower learning_rate or standardize the target.",
                     RuntimeWarning,
                 )
                 break
+            self.loss_curve_.append(loss)
+            self.n_iter_ = epoch + 1
 
             if self.early_stopping:
                 val_loss = self._compute_loss(Y_val, self._forward_propagation(X_val)[3])

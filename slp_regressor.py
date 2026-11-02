@@ -224,4 +224,9 @@ class SimpleSLPRegressor(BaseSLPEstimator):
         y_pred = self.predict(X).reshape(y.shape)
         ss_res = np.sum((y - y_pred) ** 2, axis=0)  # error left by the model (per output)
         ss_tot = np.sum((y - y.mean(axis=0)) ** 2, axis=0)  # error of always predicting the mean
-        return float(np.mean(1.0 - ss_res / ss_tot))  # average over outputs, like sklearn
+        # Constant target (ss_tot = 0): R² is undefined. Like sklearn.metrics.r2_score,
+        # return 1 for a perfect prediction and 0 otherwise instead of dividing by zero.
+        constant = ss_tot == 0
+        r2 = 1.0 - ss_res / np.where(constant, 1.0, ss_tot)
+        r2 = np.where(constant, np.where(ss_res == 0, 1.0, 0.0), r2)
+        return float(np.mean(r2))  # average over outputs, like sklearn

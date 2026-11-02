@@ -188,7 +188,7 @@ self.b2_ = np.zeros(k)
 - **Weights ~ N(0, 2 / (fan_in + fan_out))**: Glorot/Xavier initialization, the one scikit-learn uses.
   - **Random**, to break the symmetry: if all weights were equal (e.g. 0), every hidden neuron would compute the same value, receive the same gradient and stay identical forever. The hidden layer would behave like a single neuron.
   - **Scaled to the layer size**, so that the variance of the signal stays roughly the same from one layer to the next (forward) and so does the variance of the gradient (backward). With 10 inputs and 30 hidden neurons, std = √(2/40) ≈ 0.22.
-- **Why not the scaffold's example (std 0.01)?** It was the first version, and the classifier did not learn: with `W2 ≈ 0.01`, the gradient sent to the hidden layer (`da1 = dz2 @ W2.T`) is ~100 times too small, and with a sigmoid `a1 ≈ 0.5` for every sample, so the hidden layer carries no information (a **plateau**). Measured on the classifier test dataset (logistic, `learning_rate=0.001`, 200 epochs): accuracy **0.53 with std 0.01 vs 0.73 with Glorot**. The scaffold says "e.g.", so another initialization is allowed. The regressor tests all still pass with Glorot. *(The measurements in the `_train` table below were made with the old std 0.01 initialization.)*
+- **Why not the scaffold's example (std 0.01)?** It was the first version, and the classifier did not learn: with `W2 ≈ 0.01`, the gradient sent to the hidden layer (`da1 = dz2 @ W2.T`) is ~100 times too small, and with a sigmoid `a1 ≈ 0.5` for every sample, so the hidden layer carries no information (a **plateau**). Measured on the classifier test dataset (logistic, `learning_rate=0.001`, 200 epochs): accuracy **0.52 with std 0.01 vs 0.70 with Glorot**. The scaffold says "e.g.", so another initialization is allowed. The regressor tests all still pass with Glorot.
 - **Biases = 0**: the random weights are already enough to break the symmetry.
 - **`np.random.default_rng(random_state)`** instead of `np.random.seed(...)`: it creates a *local* generator. Same seed gives the same weights (reproducibility, checked by `test_reproducibility`), and it does not change NumPy's *global* random state, which the user's own code may rely on. The generator is kept in `self._rng` and reused to shuffle the mini-batches, so the whole training run is reproducible from one seed.
 
@@ -210,15 +210,18 @@ self.b2_ = np.zeros(k)
 
 The only `for` loops are over **epochs** and **batches**, never over samples or weights: inside a batch everything is matrix algebra (vectorized).
 
-**Why mini-batches (`batch_size=32` by default) and not full batch?** Measured on the test datasets (R² on the test set, `learning_rate=0.01`, 300 epochs):
+**Why mini-batches (`batch_size=32` by default) and not full batch?** Measured on the regressor test datasets (`test_linear_function` and the `regression_data` fixture: 30 % test split, `random_state=42`, raw y, R² on the test set, `learning_rate=0.01`, 300 epochs, Glorot initialization):
 
 | | linear / logistic | linear / relu | make_regression / logistic | make_regression / relu |
 |---|---|---|---|---|
-| full batch | **0.003** | 0.965 | 0.795 | 0.983 |
-| batch 32 | **0.973** | 0.994 | 0.930 | 0.990 |
-| batch 16 | 0.981 | 0.999 | 0.945 | NaN (diverges) |
+| full batch | **0.881** | 0.989 | 0.926 | 0.985 |
+| batch 32 | **0.981** | 0.998 | 0.932 | 0.990 |
+| batch 16 | 0.985 | 0.999 | 0.926 | NaN (diverges) |
 
-With small initial weights and a sigmoid, `a1 ≈ 0.5` for every sample and `dW1 ∝ W2 ≈ 0.01`: the network starts on a **plateau**. Full batch makes only 300 updates in 300 epochs, which is not enough to leave it. With batches of 32 on 140 samples there are 5 updates per epoch (1 500 in total), and the noise of each batch gradient also helps escape the plateau. Batch 16 makes steps too large for targets of order 100 and diverges. `batch_size=None` still gives full-batch gradient descent.
+Full batch makes only 300 updates in 300 epochs. With batches of 32 on 140 samples there are 5 updates per epoch (1 500 in total) for the same computing cost, so with the same learning rate the model gets further: the slowest case (sigmoid hidden layer on the linear target) goes from 0.881 to 0.981. Batch 16 makes steps too large for targets of order 100 and diverges. `batch_size=None` still gives full-batch gradient descent.
+*(With the first initialization, std 0.01, full batch was completely stuck on a plateau: R² = 0.003 on the linear/logistic case. Glorot removed the plateau, but mini-batches still converge faster.)*
+
+**Sum or mean: why the step size depends on the model.** The regressor's loss is a **mean** (`1/(2n)`), so its gradient does not depend on the batch size. The classifier's loss is a **sum** (slide 29), so its gradient grows with the batch size: one step of `learning_rate` on a batch of size B is the same as a step of `learning_rate × B` on the mean loss. That is why the classifier works with a smaller `learning_rate` (0.001), and why full batch (B = n) with a large learning rate can diverge for the classifier (breast cancer, `learning_rate=0.1`, `batch_size=None`: NaN after 89 epochs, while `batch_size=32` reaches 0.965 accuracy).
 
 **Early stopping (`early_stopping=True`)**, same logic as scikit-learn:
 - a random `validation_fraction` (10 %) of the training data is held out and **never** used for gradient steps,
@@ -226,8 +229,9 @@ With small initial weights and a sigmoid, `a1 ≈ 0.5` for every sample and `dW1
 - if it has not decreased by at least `tol` for `n_iter_no_change` epochs in a row, training stops,
 - the weights of the **best** validation epoch are restored (`.copy()` is needed, otherwise we would save a reference to arrays that keep changing).
 
-It stops training when the model starts to **overfit** (training loss still goes down, validation loss goes up), and saves time. Example on `load_diabetes` (standardized y, relu, `learning_rate=0.1`): R² = 0.248 without early stopping vs **0.493** with it (stopped at epoch 24/500).
-Limit: on a slow plateau (sigmoid, small learning rate), the validation loss can improve by less than `tol` for 10 epochs and training stops too early. This is why it is off by default.
+It stops training when the model starts to **overfit** (training loss still goes down, validation loss goes up), and saves time. Example on `load_diabetes` (80/20 split, `random_state=42`, standardized X and y, 30 hidden neurons, relu, `learning_rate=0.1`, `max_iter=500`): R² = 0.127 without early stopping vs **0.477** with it (stopped at epoch 15/500).
+With `learning_rate=0.01` there is little overfitting to prevent: early stopping saves 70-95 % of the epochs for almost the same R² (relu 0.474 → 0.468, logistic 0.469 → 0.467, tanh 0.471 → 0.441). It costs 10 % of the training data (the validation set) and adds randomness (which samples are held out), so it is off by default, as in scikit-learn.
+**`tol` and the summed loss:** `tol` is an absolute decrease of the validation loss. For the regressor (mean loss) it is a decrease *per sample*; for the classifier (summed loss) it is a decrease of the total over the validation set, so per sample it is about `n_val` times stricter (≈ 46 times on breast cancer). For the same reason, `validation_loss_curve_` and `loss_curve_` of the classifier are sums over different numbers of samples: divide each by its own n before plotting them together.
 
 **Divergence guard**: if the loss becomes `inf`/`NaN` (learning rate too large, or unscaled target), training stops with a `RuntimeWarning` that says what to change. This follows the "monitor numerical stability" tip of the project.
 
@@ -319,8 +323,9 @@ $$R^2 = 1 - \frac{SS_{res}}{SS_{tot}} = 1 - \frac{\sum_i (y_i - \hat y_i)^2}{\su
 
 ### Target scaling (important for the report)
 The model does **not** standardize `y` internally:
-- with the tests' settings (`learning_rate=0.01`, raw `y`), internal scaling makes gradients smaller and learning too slow (the linear test drops to R² ≈ 0.3);
-- but on `load_diabetes` (y between 25 and 346), raw `y` makes `dz2` huge and relu **diverges** (NaN). Even sklearn's `MLPRegressor` only reaches R² = −0.5 on the raw target.
+- `MLPRegressor` does not standardize `y` either: we keep the same interface and behaviour, and leave the preprocessing choice to the user (like `StandardScaler` for X);
+- the tests pass with raw `y` (with Glorot, standardizing y would also work: R² = 0.994 instead of 0.981 on the linear test, so this is a design choice, not a necessity);
+- but on `load_diabetes` (y between 25 and 346), raw `y` makes `dz2` huge and relu **diverges** (NaN after 1 epoch). Even sklearn's `MLPRegressor` only reaches R² = −0.35 on the raw target.
 
 So, as the project tips say, **standardize the target yourself** for real datasets and transform the predictions back:
 
@@ -330,7 +335,7 @@ reg.fit(X_train, (y_train - mu) / sd)
 y_pred = reg.predict(X_test) * sd + mu
 ```
 
-On `load_diabetes` (30 hidden neurons, 500 epochs, standardized X and y): **R² ≈ 0.50 for our model vs 0.43 for `MLPRegressor`**.
+On `load_diabetes` (80/20 split, `random_state=42`, standardized X and y, 30 hidden neurons, `learning_rate=0.01`, 500 epochs): **R² = 0.474 (relu), 0.471 (tanh), 0.469 (logistic) for our model vs 0.495 for `MLPRegressor`** (default settings, Adam). Same order of magnitude; Adam's adaptive steps give sklearn a small edge. The full comparison is in `report.ipynb`.
 
 ### Tests
 `pytest -q test_models.py -k "Regressor or regressor"`: **8/8 pass** (initialization, output shape and finiteness, R² > 0.5, loss decreases, constant target, linear function R² > 0.8, minimal data, comparison with sklearn R² > 0.6). The regressor smoke test passes too.
@@ -451,7 +456,75 @@ Our model is on par with scikit-learn. On iris it does better, because `MLPClass
 
 ## 5. Report and results
 
-*To be completed.*
+The report is [`report.ipynb`](report.ipynb). Every number in it comes from a code cell; it runs from top to bottom in about 30 seconds:
+
+```bash
+jupyter nbconvert --to notebook --execute --inplace report.ipynb
+```
+
+### Protocol (section 0 of the notebook)
+- **80/20 train/test split**, `random_state=42`, **stratified** for classification (the test set keeps the class proportions; with 30 iris flowers, an unlucky split could otherwise miss a class almost entirely).
+- **`StandardScaler` fitted on the training set only**, then applied to the test set. Fitting it on all the data would leak the test set's mean and variance into training (*data leakage*).
+- **Regression targets standardized** with the training mean/std; predictions are transformed back before computing R², so R² is on the original scale.
+- Our models: 30 hidden neurons, batches of 32; `learning_rate=0.01` (regressor) and `0.001` (classifier).
+- Two scikit-learn references:
+  - **sklearn (Adam)**: default `MLPRegressor`/`MLPClassifier` (Adam, L2 `alpha=1e-4`), same hidden size and epoch budget. This is the comparison the project asks for.
+  - **sklearn (SGD)**: `solver="sgd"`, `momentum=0`, constant learning rate, `alpha=0`, same batch size, automatic stopping disabled: **the same algorithm as ours**. If our implementation were wrong, this is where it would show.
+- **Fair learning rate for the classifier**: our loss is a sum over the batch, sklearn's a mean. A step of 0.001 on a sum of 32 terms equals a step of 0.032 on their mean, so *sklearn (SGD)* gets `learning_rate_init=0.032`.
+- **Comparable loss curves**: our regressor's loss `1/(2n) Σ (ŷ − y)²` is exactly sklearn's `squared_error` loss. Our classifier's summed loss is divided by `n_train` to get sklearn's mean cross-entropy.
+
+### Results (test set)
+
+| Model | diabetes (R²) | California (R²) | breast cancer (acc.) | iris (acc.) | digits (acc.) |
+|---|---|---|---|---|---|
+| ours, relu | 0.474 | 0.742 | 0.965 | 0.933 | 0.978 |
+| ours, tanh | 0.471 | 0.722 | 0.947 | 0.933 | 0.969 |
+| ours, logistic | 0.469 | 0.673 | 0.965 | 0.933 | 0.961 |
+| sklearn (Adam) | 0.495 | 0.746 | 0.956 | 0.867 | 0.978 |
+| sklearn (SGD, momentum 0) | 0.480 | 0.737 | 0.947 | 0.933 | 0.975 |
+| linear regression | 0.453 | 0.576 | | | |
+
+Epoch budget: 500 (diabetes), 100 (California, 516 mini-batches per epoch), 300 (classification).
+
+- **Our models are on par with scikit-learn** on all five datasets. Against *sklearn (SGD)*, the same algorithm, the gaps are at most 0.02 R² or 1-2 test samples, which come from different random initializations and batch orders.
+- *sklearn (Adam)* is slightly ahead on the regression tasks: Adam adapts the step size of every weight. It is behind on iris because it has not converged in 300 epochs (step 0.001, only 4 batches per epoch).
+- **Dataset of our choice: California housing** (20 640 districts, 8 features, target = median house value). We chose it because it is 47 times larger than diabetes and non-linear: there, all the networks beat the linear regression by far (0.74 vs 0.58), which shows what the hidden layer brings. On diabetes, the linear regression is only slightly behind (0.45 vs 0.47): the data is small, noisy and mostly linear.
+- **One test sample is worth a lot**: 1/114 = 0.9 point on breast cancer, 1/30 = 3.3 points on iris. Differences of one or two samples are not meaningful.
+
+### Analysis (section 5 of the notebook)
+
+**Batch size.**
+- *Regressor (mean loss)*, diabetes, relu, `learning_rate=0.01`, 500 epochs:
+
+  | batch_size | updates / epoch | final train loss | test R² |
+  |---|---|---|---|
+  | None (full) | 1 | 0.229 | 0.479 |
+  | 128 | 3 | 0.205 | 0.503 |
+  | 32 | 12 | 0.174 | 0.474 |
+  | 8 | 45 | 0.134 | 0.289 |
+
+  More updates per epoch means a lower **training** loss, but with batches of 8 (22 500 updates) the network fits the noise of the 353 training patients and the test R² drops: **a lower training loss is not a better model**.
+- *Classifier (summed loss)*, breast cancer, relu, `learning_rate=0.1`: the full batch (effective step 45.5 on the mean loss) and batches of 128 (12.8) **diverge** to NaN, while batches of 32 (3.2) and 8 (0.8) converge. Same learning rate, only the batch size changes: with a summed loss, **the step grows with the batch size**, so the learning rate and the batch size must be chosen together.
+
+**Early stopping**, diabetes, relu, 500 epochs:
+
+| learning_rate | early_stopping | epochs run | train R² | test R² |
+|---|---|---|---|---|
+| 0.01 | no | 500 | 0.652 | 0.474 |
+| 0.01 | yes | 50 | 0.532 | 0.468 |
+| 0.1 | no | 500 | 0.639 | **0.127** |
+| 0.1 | yes | 15 | 0.538 | **0.477** |
+
+With `learning_rate=0.1` the validation loss reaches its minimum at epoch 5 and goes back up while the training loss keeps decreasing: **overfitting**. Early stopping stops at epoch 15 and restores the epoch-5 weights: test R² 0.127 → 0.477. With `learning_rate=0.01` it mostly saves time (50 epochs instead of 500) for the same test R².
+
+**Standardization.**
+- *Raw target* (diabetes, y from 25 to 346): relu **diverges** after 1 epoch (caught by the divergence guard); tanh and logistic survive but end lower (test R² 0.407 and 0.390 instead of 0.471 and 0.469). The output error `ŷ − y` starts around 150 instead of around 1, and so does every gradient step.
+- *Raw features* (breast cancer, column means from 0.004 to 869): all three activations end up predicting the majority class for every tumour (accuracy 0.632 = share of benign tumours in the test set) instead of 0.95-0.97 with standardized features. Large inputs make `z1` huge: sigmoid and tanh saturate (derivative ≈ 0), relu takes enormous steps.
+
+### What we would say at the oral
+- Our implementation **matches scikit-learn's SGD** (same algorithm), which is the best check that the forward pass, the backpropagation and the update rule are correct, on top of the unit tests and the finite-difference gradient check.
+- The remaining gap with Adam is the **optimizer**, not the network: Adam (and momentum) are bonus items of the project that we did not implement.
+- **Preprocessing** (standardizing X, and y for regression) matters as much as the model: without it the same network saturates or diverges.
 
 ---
 
@@ -474,7 +547,7 @@ Our model is on par with scikit-learn. On iris it does better, because `MLPClass
 - **Why Glorot initialization and not std 0.01?** Weights scaled by √(2/(fan_in + fan_out)) keep the variance of activations and gradients stable across layers. With std 0.01, `W2` is so small that the hidden layer gets almost no gradient (plateau): the classifier stayed near 50 % accuracy. Glorot is also what scikit-learn uses.
 - **Why `default_rng` and not `np.random.seed`?** It is a local generator: reproducible, and it does not change NumPy's global random state.
 - **What is an epoch? A batch?** An epoch is one pass over all training samples. A batch is the subset used for one gradient step. With n = 140 and batch_size = 32, one epoch = 5 updates.
-- **Full batch vs mini-batch vs SGD?** Full batch: exact gradient, 1 update per epoch. SGD (batch = 1): very noisy, n updates per epoch. Mini-batch: a compromise, still vectorized inside a batch. Measured here: full batch was stuck (R² = 0.003 on the linear test) and batch 32 reached 0.973.
+- **Full batch vs mini-batch vs SGD?** Full batch: exact gradient, 1 update per epoch. SGD (batch = 1): very noisy, n updates per epoch. Mini-batch: a compromise, still vectorized inside a batch. Measured here (linear test, sigmoid, 300 epochs): full batch R² = 0.881, batch 32 R² = 0.981. Same cost per epoch, 5 times more updates.
 - **Why shuffle every epoch?** So the batches are different every time and the gradient noise is not biased by the order of the data.
 - **How does early stopping work, and why restore the best weights?** Hold out a validation set, stop when its loss has not improved by `tol` for `n_iter_no_change` epochs. The last weights are already slightly overfitted, so the best ones are restored.
 - **Is there a loop over samples?** No. Only over epochs and batches. Inside a batch, `a1.T @ dz2` does the sum over samples.
@@ -487,7 +560,7 @@ Our model is on par with scikit-learn. On iris it does better, because `MLPClass
 - **How did you check that the gradients are correct?** Finite differences `(L(θ+ε) − L(θ−ε))/2ε` for every parameter: difference ~1e-10.
 - **Why reshape y to (n, 1)?** `(n, 1) - (n,)` broadcasts to `(n, n)` silently, which gives a wrong gradient with no error.
 - **What does R² < 0 mean?** The model is worse than always predicting the mean of y.
-- **Why standardize y on diabetes?** y ≈ 150 makes the output error, and therefore the gradient steps, huge: training diverges. With standardized y, R² ≈ 0.50 (sklearn: 0.43). *(With the Glorot initialization: R² ≈ 0.44.)*
+- **Why standardize y on diabetes?** y ≈ 150 makes the output error, and therefore the gradient steps, huge: training diverges. With standardized y, R² ≈ 0.47 (sklearn: 0.50).
 
 ### Classifier
 - **Why sigmoid for binary and softmax for multi-class?** Sigmoid gives one probability P(class 1), enough for two classes. Softmax gives K probabilities that sum to 1. For K = 2, softmax and sigmoid are equivalent.

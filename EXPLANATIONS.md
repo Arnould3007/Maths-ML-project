@@ -233,7 +233,7 @@ It stops training when the model starts to **overfit** (training loss still goes
 With `learning_rate=0.01` there is little overfitting to prevent: early stopping saves 70-95 % of the epochs for almost the same R² (relu 0.474 → 0.468, logistic 0.469 → 0.467, tanh 0.471 → 0.441). It costs 10 % of the training data (the validation set) and adds randomness (which samples are held out), so it is off by default, as in scikit-learn.
 **`tol` and the summed loss:** `tol` is an absolute decrease of the validation loss. For the regressor (mean loss) it is a decrease *per sample*; for the classifier (summed loss) it is a decrease of the total over the validation set, so per sample it is about `n_val` times stricter (≈ 46 times on breast cancer). For the same reason, `validation_loss_curve_` and `loss_curve_` of the classifier are sums over different numbers of samples: divide each by its own n before plotting them together.
 
-**Divergence guard**: if the loss becomes `inf`/`NaN` (learning rate too large, or unscaled target), training stops with a `RuntimeWarning` that says what to change. This follows the "monitor numerical stability" tip of the project.
+**Divergence guard**: if the loss becomes `inf`/`NaN` (learning rate too large, or unscaled target), training stops with a `RuntimeWarning` that says what to change, and the weights of the last finite epoch are restored, so the model never keeps NaN weights. This follows the "monitor numerical stability" tip of the project.
 
 ---
 
@@ -325,7 +325,7 @@ $$R^2 = 1 - \frac{SS_{res}}{SS_{tot}} = 1 - \frac{\sum_i (y_i - \hat y_i)^2}{\su
 The model does **not** standardize `y` internally:
 - `MLPRegressor` does not standardize `y` either: we keep the same interface and behaviour, and leave the preprocessing choice to the user (like `StandardScaler` for X);
 - the tests pass with raw `y` (with Glorot, standardizing y would also work: R² = 0.994 instead of 0.981 on the linear test, so this is a design choice, not a necessity);
-- but on `load_diabetes` (y between 25 and 346), raw `y` makes `dz2` huge and relu **diverges** (NaN after 1 epoch). Even sklearn's `MLPRegressor` only reaches R² = −0.35 on the raw target.
+- but on `load_diabetes` (y between 25 and 346), raw `y` makes `dz2` huge and relu **diverges** (the loss becomes inf/NaN during the first epoch). Even sklearn's `MLPRegressor` only reaches R² = −0.35 on the raw target.
 
 So, as the project tips say, **standardize the target yourself** for real datasets and transform the predictions back:
 
@@ -504,7 +504,7 @@ Epoch budget: 500 (diabetes), 100 (California, 516 mini-batches per epoch), 300 
   | 8 | 45 | 0.134 | 0.289 |
 
   More updates per epoch means a lower **training** loss, but with batches of 8 (22 500 updates) the network fits the noise of the 353 training patients and the test R² drops: **a lower training loss is not a better model**.
-- *Classifier (summed loss)*, breast cancer, relu, `learning_rate=0.1`: the full batch (effective step 45.5 on the mean loss) and batches of 128 (12.8) **diverge** to NaN, while batches of 32 (3.2) and 8 (0.8) converge. Same learning rate, only the batch size changes: with a summed loss, **the step grows with the batch size**, so the learning rate and the batch size must be chosen together.
+- *Classifier (summed loss)*, breast cancer, relu, `learning_rate=0.1`: the full batch (effective step 45.5 on the mean loss) and batches of 128 (12.8) **diverge** (the loss explodes; the guard stops training and restores the last finite weights), while batches of 32 (3.2) and 8 (0.8) converge. Same learning rate, only the batch size changes: with a summed loss, **the step grows with the batch size**, so the learning rate and the batch size must be chosen together.
 
 **Early stopping**, diabetes, relu, 500 epochs:
 
@@ -518,7 +518,7 @@ Epoch budget: 500 (diabetes), 100 (California, 516 mini-batches per epoch), 300 
 With `learning_rate=0.1` the validation loss reaches its minimum at epoch 5 and goes back up while the training loss keeps decreasing: **overfitting**. Early stopping stops at epoch 15 and restores the epoch-5 weights: test R² 0.127 → 0.477. With `learning_rate=0.01` it mostly saves time (50 epochs instead of 500) for the same test R².
 
 **Standardization.**
-- *Raw target* (diabetes, y from 25 to 346): relu **diverges** after 1 epoch (caught by the divergence guard); tanh and logistic survive but end lower (test R² 0.407 and 0.390 instead of 0.471 and 0.469). The output error `ŷ − y` starts around 150 instead of around 1, and so does every gradient step.
+- *Raw target* (diabetes, y from 25 to 346): relu **diverges** during the first epoch (caught by the divergence guard, which restores the initial weights: test R² −3.97); tanh and logistic survive but end much lower (test R² 0.236 and 0.355 instead of 0.471 and 0.469). These raw-target runs are numerically unstable, so their exact values can vary slightly from one machine to another. The output error `ŷ − y` starts around 150 instead of around 1, and so does every gradient step.
 - *Raw features* (breast cancer, column means from 0.004 to 869): all three activations end up predicting the majority class for every tumour (accuracy 0.632 = share of benign tumours in the test set) instead of 0.95-0.97 with standardized features. Large inputs make `z1` huge: sigmoid and tanh saturate (derivative ≈ 0), relu takes enormous steps.
 
 ### What we would say at the oral
